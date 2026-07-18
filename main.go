@@ -15,10 +15,20 @@ import (
 
 type startSessionMsg struct{}
 
+type instancesLoadedMsg struct {
+	instances aws.InstanceData
+}
+
 // table styling using lipgloss
 var baseStyle = lipgloss.NewStyle().
 	BorderStyle(lipgloss.NormalBorder()).
 	BorderForeground(lipgloss.Color("240"))
+
+const (
+	tableBorderWidth = 2 // 1 char each side, from baseStyle's NormalBorder
+	tableCellPadding = 2 // 1 char each side per column, from table.DefaultStyles()
+	tableNumColumns  = 3
+)
 
 type model struct {
 	table     table.Model
@@ -27,11 +37,11 @@ type model struct {
 	width     int
 }
 
+func fetchInstances() tea.Msg {
+	return instancesLoadedMsg{instances: aws.NewInstanceData()}
+}
+
 func initialModel() model {
-
-	// instantiate the instances struct
-
-	ec2Instances := aws.NewInstanceData()
 
 	columns := []table.Column{
 		{Title: "Instance ID", Width: 24},
@@ -42,10 +52,6 @@ func initialModel() model {
 	// slice of slices
 	// Each element is a slice {} of strings
 	rows := []table.Row{}
-
-	for _, instance := range ec2Instances.Instances {
-		rows = append(rows, instance.GetStringData())
-	}
 
 	t := table.New(
 		table.WithColumns(columns),
@@ -75,7 +81,7 @@ func initialModel() model {
 
 // No startup I/O, so no initial command.
 func (m model) Init() tea.Cmd {
-	return nil
+	return fetchInstances
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -98,6 +104,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return startSessionMsg{}
 			})
 		}
+	case instancesLoadedMsg:
+		rows := []table.Row{}
+		for _, instance := range msg.instances.Instances {
+			rows = append(rows, instance.GetStringData())
+		}
+		m.table.SetRows(rows)
+		return m, nil
 	case startSessionMsg:
 		return m, tea.ExecProcess(exec.Command("aws", "ssm", "start-session", "--target", m.table.SelectedRow()[0]), nil)
 
@@ -105,9 +118,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-		m.table.SetWidth(msg.Width - 4)
+		m.table.SetWidth(msg.Width - tableBorderWidth)
 		m.table.SetHeight(msg.Height - 5)
-		m.table.Columns()
+
+		available := msg.Width - tableBorderWidth - tableCellPadding*tableNumColumns
+		m.table.SetColumns([]table.Column{
+			{Title: "Instance ID", Width: available * 40 / 100},
+			{Title: "Name", Width: available * 30 / 100},
+			{Title: "State", Width: available * 30 / 100},
+		})
+
 		return m, nil
 	}
 

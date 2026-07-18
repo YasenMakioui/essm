@@ -23,21 +23,21 @@ func (i instance) GetStringData() []string {
 
 // represents all instances
 
-type instanceData struct {
+type InstanceData struct {
 	Instances []instance
 }
 
 // init struct, performs a req to aws api to gather that info
 
-func NewInstanceData() instanceData {
-	i := instanceData{}
+func NewInstanceData() InstanceData {
+	i := InstanceData{}
 
 	i.update()
 
 	return i
 }
 
-func (i *instanceData) update() {
+func (i *InstanceData) update() {
 	var ec2Instances []instance
 
 	cfg, err := config.LoadDefaultConfig(context.TODO())
@@ -51,7 +51,7 @@ func (i *instanceData) update() {
 	instanceOutput, err := client.DescribeInstances(context.TODO(), instanceInput)
 
 	if err != nil {
-		log.Fatal("Could not load credentials")
+		log.Fatal("Could not retrieve instances")
 	}
 
 	// iterate over the response to get the instances
@@ -60,7 +60,7 @@ func (i *instanceData) update() {
 			// get instance ID
 			instanceId := aws.ToString(ec2instance.InstanceId)
 
-			// iterate over tags to fins Name tag, by default use NoInstanceName
+			// iterate over tags to find Name tag, by default use NoInstanceName
 			instanceName := "NoInstanceName"
 
 			for _, v := range ec2instance.Tags {
