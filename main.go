@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"essm/internal/aws"
@@ -21,7 +22,7 @@ type instancesLoadedMsg struct {
 
 // table styling using lipgloss
 var baseStyle = lipgloss.NewStyle().
-	BorderStyle(lipgloss.NormalBorder()).
+	BorderStyle(lipgloss.ThickBorder()).
 	BorderForeground(lipgloss.Color("240"))
 
 const (
@@ -31,14 +32,56 @@ const (
 )
 
 type model struct {
-	table     table.Model
-	showTable bool
-	height    int
-	width     int
+	table        table.Model
+	showTable    bool
+	height       int
+	width        int
+	searchTarget bool
+	searchText   string
 }
 
 func fetchInstances() tea.Msg {
 	return instancesLoadedMsg{instances: aws.NewInstanceData()}
+}
+
+func parseSearchValue(s, currMsg string) string {
+	// gets a string message from a key pressed.
+	// If the message is something like backspace, tab and so on, handle it.
+
+	switch s {
+	case "space":
+		return currMsg + " "
+	case "backspace":
+		// avoid issues on empty strings
+		if currMsg == "" {
+			return currMsg
+		}
+
+		// subtract last char from the current mesasge
+
+		return currMsg[:len(currMsg)-1]
+	case "tab":
+		return currMsg // don't handle tabs, this is an instance finder, not a text editor.
+	case "up":
+		return currMsg
+	case "right":
+		return currMsg
+	case "down":
+		return currMsg
+	case "left":
+		return currMsg
+	default:
+		if strings.HasPrefix(s, "ctrl+") {
+			return currMsg
+		}
+
+		if s == "delete" {
+			return currMsg
+		}
+
+		return currMsg + s
+		// f keys, ctrl + combinations and so on
+	}
 }
 
 func initialModel() model {
@@ -90,6 +133,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "esc":
+			if m.searchTarget {
+				m.searchTarget = false
+				m.searchText = ""
+				return m, cmd
+			}
+
 			if m.table.Focused() {
 				m.table.Blur()
 			} else {
@@ -97,12 +146,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "q", "ctrl+c":
 			m.showTable = false
-			return m, tea.Quit
+			if m.searchTarget {
+				if msg.String() != "ctrl+c" {
+					m.searchText = m.searchText + msg.String()
+				} else {
+					return m, tea.Quit
+				}
+			} else {
+				return m, tea.Quit
+			}
 		case "enter":
 			m.showTable = false
 			return m, tea.Tick(1000*time.Millisecond, func(time.Time) tea.Msg {
 				return startSessionMsg{}
 			})
+		case "/":
+			if m.searchTarget {
+				// search is already toggled. Add the trailing slash to the string
+				m.searchText = m.searchText + "/"
+			}
+			m.searchTarget = true
+			return m, cmd
+		default: // handle text typing. This should be another model after finishing it. Extract to its own function
+			if m.searchTarget {
+				// pass in the pressed key and the current text
+				searchVal := parseSearchValue(msg.String(), m.searchText)
+
+				// assign parsed text
+				m.searchText = searchVal
+
+				// update table highlighting
+				// TODO: handle the table view here removing rows that do not match with the search text
+				return m, cmd
+			}
 		}
 	case instancesLoadedMsg:
 		rows := []table.Row{}
@@ -133,7 +209,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	m.showTable = true // make sure table is shown if no other child process takes over the terminal
 
-	m.table, cmd = m.table.Update(msg)
+	m.table, cmd = m.table.Update(msg) // keys for navigation work here
 
 	return m, cmd
 }
@@ -141,7 +217,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() tea.View {
 
 	if m.showTable {
-		return tea.NewView(baseStyle.Render(m.table.View()) + "\n  " + m.table.HelpView() + "\n")
+		if !m.searchTarget {
+			return tea.NewView(baseStyle.Render(m.table.View()) + "\n  " + m.table.HelpView() + "\n")
+		}
+		// search could be another model with its view and functionalities. After making it work, extract it.
+		return tea.NewView(baseStyle.Render(m.table.View()) + "\n " + "Search: " + m.searchText + "\n " + m.table.HelpView() + "\n")
 	}
 
 	return tea.NewView("Connecting...")
