@@ -32,12 +32,12 @@ type InstanceData struct {
 func NewInstanceData() InstanceData {
 	i := InstanceData{}
 
-	i.update()
+	i.Update()
 
 	return i
 }
 
-func (i *InstanceData) update() {
+func (i *InstanceData) Update() {
 	var ec2Instances []instance
 
 	cfg, err := config.LoadDefaultConfig(context.TODO())
