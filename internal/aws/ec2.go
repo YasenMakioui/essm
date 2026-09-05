@@ -2,79 +2,91 @@ package aws
 
 import (
 	"context"
-	"log"
+	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 )
 
-type instance struct {
-	id    string
-	name  string
-	state string
+// SSMStatus reports whether an instance is reachable through SSM.
+type SSMStatus int
+
+const (
+	SSMUnknown SSMStatus = iota
+	SSMOnline
+	SSMOffline
+)
+
+// Instance is the domain type. It carries no UI concerns (no table.Row).
+type Instance struct {
+	ID    string
+	Name  string
+	State string    // ec2 lifecycle: running/stopped/…
+	SSM   SSMStatus // can we start-session to it?
 }
 
-func (i instance) GetStringData() []string {
-	// returns a slice with the attributes {id,}
-
-	return []string{i.id, i.name, i.state}
-}
-
-// represents all instances
-
-type InstanceData struct {
-	Instances []instance
-}
-
-// init struct, performs a req to aws api to gather that info
-
-func NewInstanceData() InstanceData {
-	i := InstanceData{}
-
-	i.Update()
-
-	return i
-}
-
-func (i *InstanceData) Update() {
-	var ec2Instances []instance
-
-	cfg, err := config.LoadDefaultConfig(context.TODO())
-
+// FetchInstances lists EC2 instances and marks which are reachable via SSM.
+func FetchInstances(ctx context.Context) ([]Instance, error) {
+	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
-		log.Fatal(err)
+		return nil, fmt.Errorf("load aws config: %w", err)
 	}
 
-	client := ec2.NewFromConfig(cfg)
-	instanceInput := &ec2.DescribeInstancesInput{}
-	instanceOutput, err := client.DescribeInstances(context.TODO(), instanceInput)
-
+	instances, err := describeInstances(ctx, cfg)
 	if err != nil {
-		log.Fatal("Could not retrieve instances")
+		return nil, err
 	}
 
-	// iterate over the response to get the instances
-	for _, object := range instanceOutput.Reservations {
-		for _, ec2instance := range object.Instances {
-			// get instance ID
-			instanceId := aws.ToString(ec2instance.InstanceId)
+	online, err := ssmOnlineSet(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
 
-			// iterate over tags to find Name tag, by default use NoInstanceName
-			instanceName := "NoInstanceName"
-
-			for _, v := range ec2instance.Tags {
-				if aws.ToString(v.Key) == "Name" {
-					instanceName = aws.ToString(v.Value)
-					break
-				}
-			}
-
-			instanceState := ec2instance.State.Name
-
-			ec2Instances = append(ec2Instances, instance{id: instanceId, name: instanceName, state: string(instanceState)})
+	for i := range instances {
+		if online[instances[i].ID] {
+			instances[i].SSM = SSMOnline
+		} else {
+			instances[i].SSM = SSMOffline
 		}
 	}
 
-	i.Instances = ec2Instances
+	return instances, nil
+}
+
+func describeInstances(ctx context.Context, cfg aws.Config) ([]Instance, error) {
+	client := ec2.NewFromConfig(cfg)
+
+	var instances []Instance
+	p := ec2.NewDescribeInstancesPaginator(client, &ec2.DescribeInstancesInput{})
+	for p.HasMorePages() {
+		out, err := p.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("describe instances: %w", err)
+		}
+		for _, res := range out.Reservations {
+			for _, in := range res.Instances {
+				state := ""
+				if in.State != nil {
+					state = string(in.State.Name)
+				}
+				instances = append(instances, Instance{
+					ID:    aws.ToString(in.InstanceId),
+					Name:  nameTag(in.Tags),
+					State: state,
+				})
+			}
+		}
+	}
+	return instances, nil
+}
+
+func nameTag(tags []ec2types.Tag) string {
+	for _, t := range tags {
+		if aws.ToString(t.Key) == "Name" {
+			return aws.ToString(t.Value)
+		}
+	}
+	return "NoInstanceName"
 }

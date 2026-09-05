@@ -30,3 +30,13 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Built binary (repo/module name; matches only the root-level binary)
+/essm
+
+# GoReleaser output
+/dist/
+
+# Local dev notes — not part of the release
+/REVIEW.md
+/TODO.md

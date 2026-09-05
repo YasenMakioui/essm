@@ -1,48 +1,63 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 	"time"
 
-	"essm/internal/aws"
+	"github.com/YasenMakioui/essm/internal/aws"
+	"github.com/YasenMakioui/essm/internal/models"
 
 	"charm.land/bubbles/v2/table"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
+type errMsg struct{ err error }
+
 type startSessionMsg struct{}
 
-type instancesLoadedMsg struct {
-	instances aws.InstanceData
-}
+type appMode int
+
+const (
+	modeTable appMode = iota
+	modeConnecting
+)
 
 // table styling using lipgloss
 var baseStyle = lipgloss.NewStyle().
 	BorderStyle(lipgloss.ThickBorder()).
 	BorderForeground(lipgloss.Color("240"))
 
+var (
+	ssmOnlineStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))  // green
+	ssmOfflineStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // dim grey
+)
+
 const refreshInterval = 30 * time.Second
 
 const (
 	tableBorderWidth = 2 // 1 char each side, from baseStyle's NormalBorder
 	tableCellPadding = 2 // 1 char each side per column, from table.DefaultStyles()
-	tableNumColumns  = 3
+	tableNumColumns  = 4
 )
 
 type model struct {
-	table        table.Model
-	showTable    bool
-	height       int
-	width        int
-	searchTarget bool
-	searchText   string
-	loading      bool
-	updatedAt    time.Time
-	currentRows  []table.Row
+	table       models.Table
+	searchInput textinput.Model // replaces searchText string
+	searching   bool            // replaces searchTarget (rename for clarity)
+	info        models.InfoPanel
+	infoID      string
+	mode        appMode
+	showInfo    bool
+	height      int
+	width       int
+	loading     bool
+	updatedAt   time.Time
+	err         error
 }
 
 type tickMsg time.Time
@@ -60,107 +75,72 @@ type rowsMsg struct {
 
 // Generate the table rows
 func fetchRows() tea.Msg {
-	i := aws.NewInstanceData()
-	rows := []table.Row{}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	for _, instance := range i.Instances {
-		rows = append(rows, instance.GetStringData())
+	instances, err := aws.FetchInstances(ctx)
+	if err != nil {
+		return errMsg{err}
 	}
-
-	return rowsMsg{rows: rows, fetchedAt: time.Now()}
+	return rowsMsg{rows: instancesToRows(instances), fetchedAt: time.Now()}
 }
 
-func filterRows(data []table.Row, filter string) []table.Row {
-	var filteredRows []table.Row
+type detailMsg struct{ detail aws.InstanceDetail }
+type detailErrMsg struct {
+	id  string
+	err error
+}
+type sessionEndedMsg struct{ err error }
 
-	// if filter string is empty, return current rows
-	if filter == "" {
-		return data
-	}
-
-	for _, r := range data {
-		if strings.Contains(r[1], filter) {
-			filteredRows = append(filteredRows, r)
+func fetchDetail(id string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		d, err := aws.FetchInstanceDetail(ctx, id)
+		if err != nil {
+			return detailErrMsg{id: id, err: err}
 		}
+		return detailMsg{d}
 	}
-
-	return filteredRows
 }
 
-// imorove function, this is a PoC right now
-func parseSearchValue(s, currMsg string) string {
-	// gets a string message from a key pressed.
-	// If the message is something like backspace, tab and so on, handle it.
+// instancesToRows maps domain data to table rows — the UI/AWS boundary.
+func instancesToRows(instances []aws.Instance) []table.Row {
+	rows := make([]table.Row, 0, len(instances))
+	for _, in := range instances {
+		rows = append(rows, table.Row{in.ID, in.Name, in.State, ssmGlyph(in.SSM)})
+	}
+	return rows
+}
 
+func ssmGlyph(s aws.SSMStatus) string {
 	switch s {
-	case "space":
-		return currMsg + " "
-	case "backspace":
-		// avoid issues on empty strings
-		if currMsg == "" {
-			return currMsg
-		}
-
-		// subtract last char from the current mesasge
-
-		return currMsg[:len(currMsg)-1]
-	case "tab":
-		return currMsg // don't handle tabs, this is an instance finder, not a text editor.
-	case "up":
-		return currMsg
-	case "right":
-		return currMsg
-	case "down":
-		return currMsg
-	case "left":
-		return currMsg
+	case aws.SSMOnline:
+		return ssmOnlineStyle.Render("● online")
+	case aws.SSMOffline:
+		return ssmOfflineStyle.Render("○ offline")
 	default:
-		if strings.HasPrefix(s, "ctrl+") {
-			return currMsg
-		}
-
-		if s == "delete" {
-			return currMsg
-		}
-
-		return currMsg + s
-		// f keys, ctrl + combinations and so on
+		return "-"
 	}
+}
+
+func (m *model) applyLayout() {
+	infoW := 0
+	if m.showInfo {
+		infoW = m.width / 3
+	}
+	m.table.SetSize(m.width-infoW, m.height-5)
+	m.info.SetSize(infoW-2, m.height-5)
 }
 
 func initialModel() model {
-
-	columns := []table.Column{
-		{Title: "Instance ID", Width: 24},
-		{Title: "Name", Width: 10},
-		{Title: "State", Width: 16},
-	}
-
-	rows := []table.Row{}
-
-	t := table.New(
-		table.WithColumns(columns),
-		table.WithRows(rows),
-		table.WithFocused(true),
-		table.WithHeight(7),
-		table.WithWidth(50),
-	)
-
-	s := table.DefaultStyles()
-	s.Header = s.Header.
-		BorderStyle(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("240")).
-		BorderBottom(true).
-		Bold(false)
-	s.Selected = s.Selected.
-		Foreground(lipgloss.Color("229")).
-		Background(lipgloss.Color("57")).
-		Bold(false)
-	t.SetStyles(s)
+	ti := textinput.New()
+	ti.Prompt = "Search: "
+	ti.Placeholder = "id or name"
 
 	return model{
-		table:     t,
-		showTable: true,
+		table:       models.NewTable(),
+		searchInput: ti,
 	}
 }
 
@@ -171,143 +151,135 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
+		// global keys
 		switch msg.String() {
+		case "ctrl+c":
+			return m, tea.Quit
 		case "esc":
-			if m.searchTarget {
-				m.searchTarget = false
-
-				// recover all tables from struct val
-				m.table.SetRows(m.currentRows)
-
-				// unser curr rows in case another search is issued
-				m.currentRows = nil
-				m.searchText = ""
-				return m, cmd
-			}
-
-			if m.table.Focused() {
-				m.table.Blur()
-			} else {
-				m.table.Focus()
-			}
-		case "q", "ctrl+c":
-			m.showTable = false
-			if m.searchTarget {
-				if msg.String() != "ctrl+c" {
-					m.searchText = m.searchText + msg.String()
-				} else {
-					return m, tea.Quit
-				}
-			} else {
-				return m, tea.Quit
-			}
-		case "enter":
-			// if there's no rows ignore, otherwise a panic will raise
-			if len(m.table.SelectedRow()) == 0 {
+			if m.searching {
+				m.searching = false
+				m.searchInput.Blur()
+				m.searchInput.Reset()
+				m.table.ClearFilter()
 				return m, nil
 			}
 
-			m.showTable = false
-			return m, tea.Tick(1000*time.Millisecond, func(time.Time) tea.Msg {
-				return startSessionMsg{}
-			})
+			if m.showInfo {
+				m.showInfo = false
+				m.applyLayout()
+				return m, nil
+			}
+			return m, nil
+
+		case "enter":
+			if !m.table.HasSelection() {
+				return m, nil
+			}
+			m.mode = modeConnecting
+			return m, func() tea.Msg { return startSessionMsg{} }
+		}
+
+		// in search mode: arrows drive the table, everything else feeds the input
+		if m.searching {
+			switch msg.String() {
+			case "up", "down", "pgup", "pgdown":
+				cmd = m.table.Update(msg)
+				return m, cmd
+			default:
+				m.searchInput, cmd = m.searchInput.Update(msg)
+				m.table.SetFilter(m.searchInput.Value())
+				return m, cmd
+			}
+		}
+
+		// not searching: table-mode keys
+		switch msg.String() {
+		case "q":
+			return m, tea.Quit
 		case "/":
-			// before toggle search target, save current rows in mem
-			// if its nil, then just asign the current rows. If it isn't that means that mem is being used
-			if m.currentRows == nil {
-				m.currentRows = m.table.Rows()
-			}
-			if m.searchTarget {
-				// search is already toggled. Add the trailing slash to the string
-				m.searchText = m.searchText + "/"
-				return m, cmd
-			}
-			m.searchTarget = true
-			return m, cmd
-		case "r": // Refresh the table. Fetch
-			if m.searchTarget {
-				m.searchText = m.searchText + "r"
-				return m, cmd
-			}
+			m.searching = true
+			return m, m.searchInput.Focus()
+		case "r":
 			if !m.loading {
 				m.loading = true
 				return m, fetchRows
 			}
 			return m, nil
-		default: // handle text typing. This should be another model after finishing it. Extract to its own function
-			if m.searchTarget {
-				// keys that do not need handling like arrow keys need to be passed to the table update below.
-				if !(msg.String() == "up" || msg.String() == "down") {
-					// pass in the pressed key and the current text
-					searchVal := parseSearchValue(msg.String(), m.searchText)
-
-					// assign parsed text
-					m.searchText = searchVal
-
-					// always filter against saved rows pre-search
-					filteredRows := filterRows(m.currentRows, m.searchText)
-					m.table.SetRows(filteredRows)
-
-					// update table highlighting
-					// TODO: handle the table view here removing rows that do not match with the search text
-					return m, cmd
-				}
+		case "i":
+			id := m.table.SelectedID()
+			if id == "" {
+				return m, nil
 			}
+			// i on the instance already shown closes the panel; i on a different one updates it
+			if m.showInfo && m.infoID == id {
+				m.showInfo = false
+				m.applyLayout()
+				return m, nil
+			}
+			m.showInfo = true
+			m.infoID = id
+			m.info.SetLoading()
+			m.applyLayout()
+			return m, fetchDetail(id)
 		}
-	case instancesLoadedMsg:
-		rows := []table.Row{}
-		for _, instance := range msg.instances.Instances {
-			rows = append(rows, instance.GetStringData())
-		}
-		m.table.SetRows(rows)
+	case rowsMsg:
+		m.updatedAt = msg.fetchedAt
+		m.table.SetRows(msg.rows)
+		m.loading = false
+		m.err = nil
 		return m, nil
-	case startSessionMsg:
-		return m, tea.ExecProcess(exec.Command("aws", "ssm", "start-session", "--target", m.table.SelectedRow()[0]), nil)
-	case tickMsg:
+	case tickMsg: // refresh rows
 		if m.loading {
 			return m, nil
 		}
 		m.loading = true
 		return m, tea.Batch(tickCmd(), fetchRows)
-	case rowsMsg:
-		m.updatedAt = msg.fetchedAt
-		// do not set rows if search mode is toggled
-		if !m.searchTarget {
-			m.table.SetRows(msg.rows)
-		}
+	case startSessionMsg:
+		return m, tea.ExecProcess(
+			exec.Command("aws", "ssm", "start-session", "--target", m.table.SelectedID()),
+			func(err error) tea.Msg { return sessionEndedMsg{err} },
+		)
+	case errMsg:
+		m.err = msg.err
 		m.loading = false
+		return m, nil
+	case detailMsg:
+		if msg.detail.ID == m.infoID {
+			m.info.SetDetail(msg.detail)
+		}
+		return m, nil
+	case detailErrMsg:
+		if msg.id == m.infoID {
+			m.info.SetError(msg.err)
+		}
+		return m, nil
+	case sessionEndedMsg:
+		m.mode = modeTable
+		if msg.err != nil {
+			m.err = msg.err
+		}
 		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-
-		m.table.SetWidth(msg.Width - tableBorderWidth)
-		m.table.SetHeight(msg.Height - 5)
-
-		available := msg.Width - tableBorderWidth - tableCellPadding*tableNumColumns
-		m.table.SetColumns([]table.Column{
-			{Title: "Instance ID", Width: available * 40 / 100},
-			{Title: "Name", Width: available * 30 / 100},
-			{Title: "State", Width: available * 30 / 100},
-		})
-
+		m.applyLayout()
 		return m, nil
 	}
 
-	// Default handling
-	// If there is no search mode, session started or other action, we show the table
-	// and pass the message to sub-models
-
-	m.showTable = true // make sure table is shown if no other child process takes over the terminal
-
-	m.table, cmd = m.table.Update(msg) // keys for navigation work here
+	cmd = m.table.Update(msg) // for any other unhandled case
 
 	return m, cmd
 }
 
 func (m model) View() tea.View {
+	if m.mode == modeConnecting {
+		v := tea.NewView("Connecting...")
+		v.AltScreen = true
+		return v
+	}
 
 	status := "up to date"
 
@@ -324,20 +296,28 @@ func (m model) View() tea.View {
 	footer := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("240")).
 		Render(fmt.Sprintf(
-			"last update: %s  •  %s  •  every %s\n↑/↓ move · r refresh · esc focus · q quit",
+			"last update: %s  •  %s  •  every %s\n↑/↓ move · / search · i info · r refresh · q quit",
 			stamp, status, refreshInterval,
 		))
 
-	if m.showTable {
-		if !m.searchTarget {
-			return tea.NewView(baseStyle.Render(m.table.View()) + "\n" + footer + "\n")
-		}
-		// search could be another model with its view and functionalities. After making it work, extract it.
-		return tea.NewView(baseStyle.Render(m.table.View()) + "\n " + "Search: " + m.searchText + "\n" + footer + "\n")
+	if m.err != nil {
+		footer = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")).
+			Render("error: "+m.err.Error()) + "\n" + footer
 	}
 
-	return tea.NewView("Connecting...")
-
+	body := m.table.View()
+	if m.showInfo {
+		body = lipgloss.JoinHorizontal(lipgloss.Top, body, m.info.View())
+	}
+	body += "\n"
+	if m.searching {
+		body += m.searchInput.View() + "\n"
+	}
+	body += footer + "\n"
+	v := tea.NewView(body)
+	v.AltScreen = true
+	return v
 }
 
 func main() {
