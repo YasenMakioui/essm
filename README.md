@@ -51,6 +51,14 @@ Built on [Bubble Tea](https://github.com/charmbracelet/bubbletea), [Bubbles](htt
 
 ## Install
 
+You can either use the install script, download a release, build from source or install using go
+
+### Run the install script
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/YasenMakioui/essm-web/main/install.sh | bash
+```
+
 ### Download a release
 
 Grab a prebuilt binary for your platform from the [**releases page**](https://github.com/YasenMakioui/essm/releases), or install with Go:
@@ -83,7 +91,7 @@ go build -o essm .
 2. Run it:
 
    ```bash
-   ./essm
+   essm
    ```
 
 3. Navigate to an instance and press <kbd>Enter</kbd> to open a Session Manager session. When you exit the session, you're back in `essm`.
